@@ -14,6 +14,7 @@ import torch.utils.data
 
 import torchaudio
 from lightning import LightningDataModule
+from ..utils.calibration import np_mid_to_hz
 
 from src.data.hcqt import HarmonicCQT
 
@@ -225,10 +226,11 @@ class AudioDataModule(LightningDataModule):
             pbar.set_description(fname)
             x, sr = torchaudio.load(str(data_dir / fname))
             out = self.hcqt(x.mean(dim=0), sr)  # convert to mono and compute HCQT
+            # out = self.hcqt(x[1], sr)  # use right chnl only
 
             if annot is not None:
                 annot = annot.strip()
-                freqs = np.loadtxt(data_dir / annot, delimiter=',', dtype=np.float32).T
+                freqs = np_mid_to_hz(np.loadtxt(data_dir / annot, delimiter=',', dtype=np.float32).T)
                 timesteps = np.arange(len(freqs)) * 0.02
                 hop_duration = 1000 * (timesteps[1] - timesteps[0])
 
