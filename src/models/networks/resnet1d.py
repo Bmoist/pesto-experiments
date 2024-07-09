@@ -198,7 +198,7 @@ class Resnet1dWtAttention(nn.Module):
                  activation_fn: str = "leaky",
                  a_lrelu=0.3,
                  p_dropout=0.2,
-                 embed_dim=64,
+                 embed_dim=264,
                  num_heads=8):
         super().__init__()
 
@@ -294,6 +294,7 @@ class Resnet1dWtAttention(nn.Module):
                 x = prefilt_layer(x)
 
         x = self.conv_layers(x)
+        x = x.permute(0, 2, 1)
         x = self.attention(x)
 
         x = self.flatten(x)
