@@ -24,13 +24,50 @@ class SelfAttention(nn.Module):
         self.attention = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True)
 
     def forward(self, x):
-        # Input x shape: (batch, channels, seq_len)
-        # Permute to (batch, seq_len, channels)
-        x = x.permute(0, 2, 1)
+        # Input x shape: (batch, seq_len, channels), already permuted before PosCNN in ResnetW/Attention
         attn_output, _ = self.attention(x, x, x)
         # Permute back to (batch, channels, seq_len)
         attn_output = attn_output.permute(0, 2, 1)
         return attn_output
+
+
+class RelativePositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super(RelativePositionalEncoding, self).__init__()
+        self.d_model = d_model
+
+        # Create a long enough 'relative positional encoding' matrix
+        self.relative_position = nn.Parameter(torch.randn(max_len, d_model))
+
+    def forward(self, x):
+        batch_size, seq_len, d_model = x.size()
+        assert d_model == self.d_model, "Embedding dimension must match d_model"
+
+        pos = torch.arange(seq_len, device=x.device).unsqueeze(0).repeat(seq_len, 1)
+        rel_pos = pos - pos.transpose(0, 1)
+        rel_pos = rel_pos.clamp(-self.relative_position.size(0) // 2,
+                                self.relative_position.size(0) // 2) + self.relative_position.size(0) // 2
+
+        rel_pos_enc = self.relative_position[rel_pos, torch.arange(d_model, device=x.device)]
+        return x + rel_pos_enc
+
+
+class PosCNN(nn.Module):
+    def __init__(self, in_chans, embed_dim=768, s=1):
+        super(PosCNN, self).__init__()
+        self.proj = nn.Sequential(nn.Conv2d(in_chans, embed_dim, 3, s, 1, bias=True, groups=embed_dim), )
+        self.s = s
+
+    def forward(self, x, H, W):
+        B, N, C = x.shape
+        feat_token = x
+        cnn_feat = feat_token.transpose(1, 2).view(B, C, H, W)
+        if self.s == 1:
+            x = self.proj(cnn_feat) + cnn_feat
+        else:
+            x = self.proj(cnn_feat)
+        x = x.flatten(2).transpose(1, 2)
+        return x
 
 
 class Resnet1d(nn.Module):
@@ -198,8 +235,8 @@ class Resnet1dWtAttention(nn.Module):
                  activation_fn: str = "leaky",
                  a_lrelu=0.3,
                  p_dropout=0.2,
-                 embed_dim=264,
-                 num_heads=8):
+                 embed_dim=3,
+                 num_heads=1):
         super().__init__()
 
         self.hparams = dict(n_chan_input=n_chan_input,
@@ -270,6 +307,8 @@ class Resnet1dWtAttention(nn.Module):
         self.conv_layers = nn.Sequential(*conv_layers)
 
         self.attention = SelfAttention(embed_dim=embed_dim, num_heads=num_heads)
+        self.rpe = RelativePositionalEncoding(d_model=embed_dim, max_len=5000)
+        self.peg = PosCNN(in_chans=n_ch[-1], embed_dim=embed_dim)
 
         self.flatten = nn.Flatten(start_dim=1)
         self.fc = ToeplitzLinear(n_bins_in * n_ch[-1], output_dim)
@@ -295,6 +334,8 @@ class Resnet1dWtAttention(nn.Module):
 
         x = self.conv_layers(x)
         x = x.permute(0, 2, 1)
+        H, W = 1, x.size(1)
+        x = self.peg(x, H, W)
         x = self.attention(x)
 
         x = self.flatten(x)
