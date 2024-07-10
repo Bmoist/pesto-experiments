@@ -1,6 +1,8 @@
 from functools import partial
 
 import torch
+import math
+import torch.nn.functional as F
 import torch.nn as nn
 
 
@@ -18,35 +20,178 @@ class ToeplitzLinear(nn.Conv1d):
         return super(ToeplitzLinear, self).forward(input.unsqueeze(-2)).squeeze(-2)
 
 
-class SelfAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads):
-        super(SelfAttention, self).__init__()
-        self.attention = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True)
+class RelativePosition(nn.Module):
 
-    def forward(self, x):
-        # Input x shape: (batch, seq_len, channels), already permuted before PosCNN in ResnetW/Attention
-        attn_output, _ = self.attention(x, x, x)
-        # Permute back to (batch, channels, seq_len)
-        return attn_output
-
-
-class RelativePositionalEncoding(nn.Module):
-    def __init__(self, max_relative_position=128, embedding_dim=128):
+    def __init__(self, num_units, max_relative_position):
         super().__init__()
+        self.num_units = num_units
         self.max_relative_position = max_relative_position
-        self.embedding_dim = embedding_dim
-        self.relative_embeddings = nn.Embedding(2 * max_relative_position + 1, embedding_dim)
+        self.embeddings_table = nn.Parameter(torch.Tensor(max_relative_position * 2 + 1, num_units))
+        nn.init.xavier_uniform_(self.embeddings_table)
+
+    def forward(self, length_q, length_k):
+        range_vec_q = torch.arange(length_q)
+        range_vec_k = torch.arange(length_k)
+        distance_mat = range_vec_k[None, :] - range_vec_q[:, None]
+        distance_mat_clipped = torch.clamp(distance_mat, -self.max_relative_position, self.max_relative_position)
+        final_mat = distance_mat_clipped + self.max_relative_position
+        final_mat = torch.LongTensor(final_mat)
+        embeddings = self.embeddings_table[final_mat]
+
+        return embeddings
+
+
+class MultiHeadAttentionLayer(nn.Module):
+    def __init__(self, hid_dim, n_heads, dropout):
+        super().__init__()
+
+        assert hid_dim % n_heads == 0
+
+        self.hid_dim = hid_dim
+        self.n_heads = n_heads
+        self.head_dim = hid_dim // n_heads
+        self.max_relative_position = 2
+
+        self.relative_position_k = RelativePosition(self.head_dim, self.max_relative_position)
+        # self.relative_position_v = RelativePosition(self.head_dim, self.max_relative_position)
+
+        self.fc_q = nn.Linear(hid_dim, hid_dim)
+        self.fc_k = nn.Linear(hid_dim, hid_dim)
+        self.fc_v = nn.Linear(hid_dim, hid_dim)
+
+        self.fc_o = nn.Linear(hid_dim, hid_dim)
+
+        self.dropout = nn.Dropout(dropout)
+
+        self.scale = torch.sqrt(torch.FloatTensor([self.head_dim]))
+
+    def forward(self, query, key, value, mask=None):
+        # query = [batch size, query len, hid dim]
+        # key = [batch size, key len, hid dim]
+        # value = [batch size, value len, hid dim]
+        batch_size = query.shape[0]
+        len_k = key.shape[1]
+        len_q = query.shape[1]
+        len_v = value.shape[1]
+
+        query = self.fc_q(query)
+        key = self.fc_k(key)
+        value = self.fc_v(value)
+
+        r_q1 = query.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        r_k1 = key.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        attn1 = torch.matmul(r_q1, r_k1.permute(0, 1, 3, 2)).to(query.device)
+
+        r_q2 = query.permute(1, 0, 2).contiguous().view(len_q, batch_size * self.n_heads, self.head_dim)
+        r_k2 = self.relative_position_k(len_q, len_k)
+        attn2 = torch.matmul(r_q2, r_k2.transpose(1, 2)).transpose(0, 1)
+        attn2 = attn2.contiguous().view(batch_size, self.n_heads, len_q, len_k).to(query.device)
+        attn = (attn1 + attn2) / self.scale.to(query.device)
+
+        if mask is not None:
+            attn = attn.masked_fill(mask == 0, -1e10)
+
+        attn = self.dropout(torch.softmax(attn, dim=-1))
+
+        # attn = [batch size, n heads, query len, key len]
+        r_v1 = value.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        weight1 = torch.matmul(attn, r_v1)
+        # r_v2 = self.relative_position_v(len_q, len_v)
+        # weight2 = attn.permute(2, 0, 1, 3).contiguous().view(len_q, batch_size * self.n_heads, len_k)
+        # weight2 = torch.matmul(weight2, r_v2)
+        # weight2 = weight2.transpose(0, 1).contiguous().view(batch_size, self.n_heads, len_q, self.head_dim)
+
+        x = weight1  # + weight2
+
+        # x = [batch size, n heads, query len, head dim]
+
+        x = x.permute(0, 2, 1, 3).contiguous()
+
+        # x = [batch size, query len, n heads, head dim]
+
+        x = x.view(batch_size, -1, self.hid_dim)
+
+        # x = [batch size, query len, hid dim]
+
+        x = self.fc_o(x)
+
+        # x = [batch size, query len, hid dim]
+
+        return x
+
+
+class RelativeGlobalAttention(nn.Module):
+    def __init__(self, d_model, num_heads, max_len=1024, dropout=0.1):
+        super().__init__()
+        d_head, remainder = divmod(d_model, num_heads)
+        if remainder:
+            raise ValueError(
+                "incompatible `d_model` and `num_heads`"
+            )
+        self.max_len = max_len
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.key = nn.Linear(d_model, d_model)
+        self.value = nn.Linear(d_model, d_model)
+        self.query = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.Er = nn.Parameter(torch.randn(max_len, d_head))
+        self.register_buffer(
+            "mask",
+            torch.tril(torch.ones(max_len, max_len))
+            .unsqueeze(0).unsqueeze(0)
+        )
+        # self.mask.shape = (1, 1, max_len, max_len)
 
     def forward(self, x):
-        batch_size, seq_length, _ = x.size()
-        positions = torch.arange(seq_length, device=x.device).unsqueeze(0).expand(batch_size, -1)
+        # x.shape == (batch_size, seq_len, d_model)
+        batch_size, seq_len, _ = x.shape
 
-        relative_positions = positions.unsqueeze(2) - positions.unsqueeze(1)
-        relative_positions_clipped = torch.clamp(relative_positions, -self.max_relative_position,
-                                                 self.max_relative_position) + self.max_relative_position
+        if seq_len > self.max_len:
+            raise ValueError(
+                "sequence length exceeds model capacity"
+            )
 
-        relative_position_encodings = self.relative_embeddings(relative_positions_clipped)
-        return x + relative_position_encodings
+        k_t = self.key(x).reshape(batch_size, seq_len, self.num_heads, -1).permute(0, 2, 3, 1)
+        # k_t.shape = (batch_size, num_heads, d_head, seq_len)
+        v = self.value(x).reshape(batch_size, seq_len, self.num_heads, -1).transpose(1, 2)
+        q = self.query(x).reshape(batch_size, seq_len, self.num_heads, -1).transpose(1, 2)
+        # shape = (batch_size, num_heads, seq_len, d_head)
+
+        start = self.max_len - seq_len
+        Er_t = self.Er[start:, :].transpose(0, 1)
+        # Er_t.shape = (d_head, seq_len)
+        QEr = torch.matmul(q, Er_t)
+        # QEr.shape = (batch_size, num_heads, seq_len, seq_len)
+        Srel = self.skew(QEr)
+        # Srel.shape = (batch_size, num_heads, seq_len, seq_len)
+
+        QK_t = torch.matmul(q, k_t)
+        # QK_t.shape = (batch_size, num_heads, seq_len, seq_len)
+        attn = (QK_t + Srel) / math.sqrt(q.size(-1))
+        mask = self.mask[:, :, :seq_len, :seq_len]
+        # mask.shape = (1, 1, seq_len, seq_len)
+        attn = attn.masked_fill(mask == 0, float("-inf"))
+        # attn.shape = (batch_size, num_heads, seq_len, seq_len)
+        attn = F.softmax(attn, dim=-1)
+        out = torch.matmul(attn, v)
+        # out.shape = (batch_size, num_heads, seq_len, d_head)
+        out = out.transpose(1, 2)
+        # out.shape == (batch_size, seq_len, num_heads, d_head)
+        out = out.reshape(batch_size, seq_len, -1)
+        # out.shape == (batch_size, seq_len, d_model)
+        return self.dropout(out)
+
+    def skew(self, QEr):
+        # QEr.shape = (batch_size, num_heads, seq_len, seq_len)
+        padded = F.pad(QEr, (1, 0))
+        # padded.shape = (batch_size, num_heads, seq_len, 1 + seq_len)
+        batch_size, num_heads, num_rows, num_cols = padded.shape
+        reshaped = padded.reshape(batch_size, num_heads, num_cols, num_rows)
+        # reshaped.size = (batch_size, num_heads, 1 + seq_len, seq_len)
+        Srel = reshaped[:, :, 1:, :]
+        # Srel.shape = (batch_size, num_heads, seq_len, seq_len)
+        return Srel
 
 
 class PosCNN(nn.Module):
@@ -249,7 +394,7 @@ class Resnet1dWtAttention(nn.Module):
                  activation_fn: str = "leaky",
                  a_lrelu=0.3,
                  p_dropout=0.2,
-                 embed_dim=64,
+                 embed_dim=12,
                  num_heads=4):
         super().__init__()
 
@@ -280,6 +425,7 @@ class Resnet1dWtAttention(nn.Module):
 
         # Layer normalization over frequency and channels (harmonics of HCQT)
         self.layernorm = nn.LayerNorm(normalized_shape=[n_in, n_bins_in])
+        self.n_bins_in = n_bins_in
 
         # Prefiltering
         prefilt_padding = prefilt_kernel_size // 2
@@ -320,12 +466,13 @@ class Resnet1dWtAttention(nn.Module):
             ])
         self.conv_layers = nn.Sequential(*conv_layers)
 
-        self.attention = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, dropout=0.1)
-        self.rpe = RelativePositionalEncoding(max_relative_position=5000, embedding_dim=embed_dim)
+        self.proj = nn.Linear(n_ch[-1] * n_bins_in, embed_dim * n_bins_in)
+        # self.attention = MultiHeadAttentionLayer(hid_dim=embed_dim, n_heads=num_heads, dropout=p_dropout)
+        self.attention = RelativeGlobalAttention(d_model=embed_dim, num_heads=num_heads, dropout=p_dropout)
+        self.embed_dim = embed_dim
 
         self.flatten = nn.Flatten(start_dim=1)
-        self.fc = ToeplitzLinear(n_bins_in * n_ch[-1], output_dim)
-
+        self.fc = ToeplitzLinear(n_bins_in * n_ch[-1] * num_heads, output_dim)
         self.final_norm = nn.Softmax(dim=-1)
 
     def forward(self, x):
@@ -347,10 +494,12 @@ class Resnet1dWtAttention(nn.Module):
 
         x = self.conv_layers(x)
 
-        x = x.permute(1, 0, 2)  # seq-len, batch-size, chnls
-        x = self.rpe(x)
-        x, _ = self.attention_layer(x, x, x)
-        x = x.permute(1, 0, 2)
+        # Apply MultiheadAttention:
+        x = self.flatten(x)
+        x = self.proj(x)
+        x = x.view(x.size(0), self.embed_dim, self.n_bins_in)
+        x = x.permute(0, 2, 1)  # [batch size, seq len, hid dim]
+        x = self.attention(x)
 
         x = self.flatten(x)
 
