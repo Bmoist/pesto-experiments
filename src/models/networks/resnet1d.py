@@ -228,6 +228,14 @@ class PosCNN1D(nn.Module):
             x = self.proj(cnn_feat)
         return x
 
+class  PEG(nn.Module):
+      def __init__(self, in_channels, embed_dim, kernel_size=3, stride=1):
+        super(PEG, self).__init__()
+        self.proj = nn.Conv1d(in_channels, embed_dim, kernel_size, stride, padding=kernel_size//2, groups=in_channels, bias=True)
+
+      def forward(self, x):
+        return self.proj(x) + x
+
 
 class Resnet1d(nn.Module):
     """
