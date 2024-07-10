@@ -394,7 +394,7 @@ class Resnet1dWtAttention(nn.Module):
                  activation_fn: str = "leaky",
                  a_lrelu=0.3,
                  p_dropout=0.2,
-                 embed_dim=12,
+                 embed_dim=16,
                  num_heads=4):
         super().__init__()
 
@@ -472,7 +472,8 @@ class Resnet1dWtAttention(nn.Module):
         self.embed_dim = embed_dim
 
         self.flatten = nn.Flatten(start_dim=1)
-        self.fc = ToeplitzLinear(n_bins_in * n_ch[-1] * num_heads, output_dim)
+        self.fc = ToeplitzLinear(n_bins_in * embed_dim, output_dim)
+        # self.fc = ToeplitzLinear(n_bins_in * n_ch[-1], output_dim)
         self.final_norm = nn.Softmax(dim=-1)
 
     def forward(self, x):
