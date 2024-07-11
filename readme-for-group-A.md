@@ -9,7 +9,7 @@ But in case you want to download the data by yourself, here's the tutorial:
 2. Download MIR-1k from kaggle and put it inside this folder.
 3. Generate csv file: 
    ```shell
-   find MIR-1K/Vocals -name "*.wav" | sort > mir-1k.csv
+   find MIR-1K/Wavfile -name "*.wav" | sort > mir-1k.csv
    find MIR-1K/PitchLabel -name "*.pv" | sort > mir-1k_annot.csv
    ```
 4. Start training!

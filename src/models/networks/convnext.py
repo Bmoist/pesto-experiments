@@ -150,11 +150,12 @@ class ModConvNeXt(nn.Module):
 
         self.norm = nn.LayerNorm(dims[-1], eps=1e-6)  # final norm layer
         # self.fc = nn.Linear(dims[-1], output_dim)
+        # self.fc.weight.data.mul_(head_init_scale)
+        # self.fc.bias.data.mul_(head_init_scale)
+
         self.fc = ToeplitzLinear(dims[-1], output_dim)
 
         self.apply(self._init_weights)
-        self.fc.weight.data.mul_(head_init_scale)
-        self.fc.bias.data.mul_(head_init_scale)
         self.final_norm = nn.Softmax(dim=-1)
 
     def _init_weights(self, m):
