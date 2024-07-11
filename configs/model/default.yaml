@@ -1,7 +1,7 @@
 _target_: src.models.pesto.PESTO
 
 encoder:
-  _target_: src.models.networks.resnet1d.Resnet1dWtAttention
+  _target_: src.models.networks.resnet1d.ACResnet1d
   n_chan_input: ${len:${data.harmonics}}
   n_chan_layers:
     - 40

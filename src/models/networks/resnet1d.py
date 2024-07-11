@@ -1,9 +1,7 @@
 from functools import partial
-
 import torch
-import math
-import torch.nn.functional as F
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class ToeplitzLinear(nn.Conv1d):
@@ -18,215 +16,6 @@ class ToeplitzLinear(nn.Conv1d):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return super(ToeplitzLinear, self).forward(input.unsqueeze(-2)).squeeze(-2)
-
-
-class RelativePosition(nn.Module):
-
-    def __init__(self, num_units, max_relative_position):
-        super().__init__()
-        self.num_units = num_units
-        self.max_relative_position = max_relative_position
-        self.embeddings_table = nn.Parameter(torch.Tensor(max_relative_position * 2 + 1, num_units))
-        nn.init.xavier_uniform_(self.embeddings_table)
-
-    def forward(self, length_q, length_k):
-        range_vec_q = torch.arange(length_q)
-        range_vec_k = torch.arange(length_k)
-        distance_mat = range_vec_k[None, :] - range_vec_q[:, None]
-        distance_mat_clipped = torch.clamp(distance_mat, -self.max_relative_position, self.max_relative_position)
-        final_mat = distance_mat_clipped + self.max_relative_position
-        final_mat = torch.LongTensor(final_mat)
-        embeddings = self.embeddings_table[final_mat]
-
-        return embeddings
-
-
-class MultiHeadAttentionLayer(nn.Module):
-    def __init__(self, hid_dim, n_heads, dropout):
-        super().__init__()
-
-        assert hid_dim % n_heads == 0
-
-        self.hid_dim = hid_dim
-        self.n_heads = n_heads
-        self.head_dim = hid_dim // n_heads
-        self.max_relative_position = 2
-
-        self.relative_position_k = RelativePosition(self.head_dim, self.max_relative_position)
-        # self.relative_position_v = RelativePosition(self.head_dim, self.max_relative_position)
-
-        self.fc_q = nn.Linear(hid_dim, hid_dim)
-        self.fc_k = nn.Linear(hid_dim, hid_dim)
-        self.fc_v = nn.Linear(hid_dim, hid_dim)
-
-        self.fc_o = nn.Linear(hid_dim, hid_dim)
-
-        self.dropout = nn.Dropout(dropout)
-
-        self.scale = torch.sqrt(torch.FloatTensor([self.head_dim]))
-
-    def forward(self, query, key, value, mask=None):
-        # query = [batch size, query len, hid dim]
-        # key = [batch size, key len, hid dim]
-        # value = [batch size, value len, hid dim]
-        batch_size = query.shape[0]
-        len_k = key.shape[1]
-        len_q = query.shape[1]
-        len_v = value.shape[1]
-
-        query = self.fc_q(query)
-        key = self.fc_k(key)
-        value = self.fc_v(value)
-
-        r_q1 = query.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        r_k1 = key.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        attn1 = torch.matmul(r_q1, r_k1.permute(0, 1, 3, 2)).to(query.device)
-
-        r_q2 = query.permute(1, 0, 2).contiguous().view(len_q, batch_size * self.n_heads, self.head_dim)
-        r_k2 = self.relative_position_k(len_q, len_k)
-        attn2 = torch.matmul(r_q2, r_k2.transpose(1, 2)).transpose(0, 1)
-        attn2 = attn2.contiguous().view(batch_size, self.n_heads, len_q, len_k).to(query.device)
-        attn = (attn1 + attn2) / self.scale.to(query.device)
-
-        if mask is not None:
-            attn = attn.masked_fill(mask == 0, -1e10)
-
-        attn = self.dropout(torch.softmax(attn, dim=-1))
-
-        # attn = [batch size, n heads, query len, key len]
-        r_v1 = value.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        weight1 = torch.matmul(attn, r_v1)
-        # r_v2 = self.relative_position_v(len_q, len_v)
-        # weight2 = attn.permute(2, 0, 1, 3).contiguous().view(len_q, batch_size * self.n_heads, len_k)
-        # weight2 = torch.matmul(weight2, r_v2)
-        # weight2 = weight2.transpose(0, 1).contiguous().view(batch_size, self.n_heads, len_q, self.head_dim)
-
-        x = weight1  # + weight2
-
-        # x = [batch size, n heads, query len, head dim]
-
-        x = x.permute(0, 2, 1, 3).contiguous()
-
-        # x = [batch size, query len, n heads, head dim]
-
-        x = x.view(batch_size, -1, self.hid_dim)
-
-        # x = [batch size, query len, hid dim]
-
-        x = self.fc_o(x)
-
-        # x = [batch size, query len, hid dim]
-
-        return x
-
-
-class RelativeGlobalAttention(nn.Module):
-    def __init__(self, d_model, num_heads, max_len=1024, dropout=0.1):
-        super().__init__()
-        d_head, remainder = divmod(d_model, num_heads)
-        if remainder:
-            raise ValueError(
-                "incompatible `d_model` and `num_heads`"
-            )
-        self.max_len = max_len
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.key = nn.Linear(d_model, d_model)
-        self.value = nn.Linear(d_model, d_model)
-        self.query = nn.Linear(d_model, d_model)
-        self.dropout = nn.Dropout(dropout)
-        self.Er = nn.Parameter(torch.randn(max_len, d_head))
-        self.register_buffer(
-            "mask",
-            torch.tril(torch.ones(max_len, max_len))
-            .unsqueeze(0).unsqueeze(0)
-        )
-        # self.mask.shape = (1, 1, max_len, max_len)
-
-    def forward(self, x):
-        # x.shape == (batch_size, seq_len, d_model)
-        batch_size, seq_len, _ = x.shape
-
-        if seq_len > self.max_len:
-            raise ValueError(
-                "sequence length exceeds model capacity"
-            )
-
-        k_t = self.key(x).reshape(batch_size, seq_len, self.num_heads, -1).permute(0, 2, 3, 1)
-        # k_t.shape = (batch_size, num_heads, d_head, seq_len)
-        v = self.value(x).reshape(batch_size, seq_len, self.num_heads, -1).transpose(1, 2)
-        q = self.query(x).reshape(batch_size, seq_len, self.num_heads, -1).transpose(1, 2)
-        # shape = (batch_size, num_heads, seq_len, d_head)
-
-        start = self.max_len - seq_len
-        Er_t = self.Er[start:, :].transpose(0, 1)
-        # Er_t.shape = (d_head, seq_len)
-        QEr = torch.matmul(q, Er_t)
-        # QEr.shape = (batch_size, num_heads, seq_len, seq_len)
-        Srel = self.skew(QEr)
-        # Srel.shape = (batch_size, num_heads, seq_len, seq_len)
-
-        QK_t = torch.matmul(q, k_t)
-        # QK_t.shape = (batch_size, num_heads, seq_len, seq_len)
-        attn = (QK_t + Srel) / math.sqrt(q.size(-1))
-        mask = self.mask[:, :, :seq_len, :seq_len]
-        # mask.shape = (1, 1, seq_len, seq_len)
-        attn = attn.masked_fill(mask == 0, float("-inf"))
-        # attn.shape = (batch_size, num_heads, seq_len, seq_len)
-        attn = F.softmax(attn, dim=-1)
-        out = torch.matmul(attn, v)
-        # out.shape = (batch_size, num_heads, seq_len, d_head)
-        out = out.transpose(1, 2)
-        # out.shape == (batch_size, seq_len, num_heads, d_head)
-        out = out.reshape(batch_size, seq_len, -1)
-        # out.shape == (batch_size, seq_len, d_model)
-        return self.dropout(out)
-
-    def skew(self, QEr):
-        # QEr.shape = (batch_size, num_heads, seq_len, seq_len)
-        padded = F.pad(QEr, (1, 0))
-        # padded.shape = (batch_size, num_heads, seq_len, 1 + seq_len)
-        batch_size, num_heads, num_rows, num_cols = padded.shape
-        reshaped = padded.reshape(batch_size, num_heads, num_cols, num_rows)
-        # reshaped.size = (batch_size, num_heads, 1 + seq_len, seq_len)
-        Srel = reshaped[:, :, 1:, :]
-        # Srel.shape = (batch_size, num_heads, seq_len, seq_len)
-        return Srel
-
-
-class PosCNN(nn.Module):
-    def __init__(self, in_chans, embed_dim=768, s=1):
-        super(PosCNN, self).__init__()
-        self.proj = nn.Sequential(
-            nn.Conv2d(in_chans, embed_dim, kernel_size=(3, 1), stride=(s, 1), padding=(1, 0), bias=True,
-                      groups=embed_dim),
-            nn.ReLU(inplace=True)
-        )
-        self.s = s
-
-    def forward(self, x, H, W):
-        B, N, C = x.shape
-        feat_token = x
-        cnn_feat = feat_token.view(B, N, C, 1)  # reshape to [batch_size, sequence_length, channels, 1]
-        cnn_feat = self.proj(cnn_feat) + cnn_feat if self.s == 1 else self.proj(cnn_feat)
-        x = cnn_feat.flatten(2).transpose(1, 2)
-        return x
-
-
-class PosCNN1D(nn.Module):
-    def __init__(self, in_chans, embed_dim=768, s=1):
-        super(PosCNN1D, self).__init__()
-        self.proj = nn.Conv1d(in_chans, embed_dim, 3, stride=s, padding=1, bias=True, groups=embed_dim)
-        self.s = s
-
-    def forward(self, x):
-        B, C, L = x.shape
-        cnn_feat = x
-        if self.s == 1:
-            x = self.proj(cnn_feat) + cnn_feat
-        else:
-            x = self.proj(cnn_feat)
-        return x
 
 
 class Resnet1d(nn.Module):
@@ -361,26 +150,241 @@ class Resnet1d(nn.Module):
         return self.final_norm(y_pred)
 
 
-class Resnet1dWtAttention(nn.Module):
-    """
-    Basic CNN similar to the one in Johannes Zeitler's report,
-    but for longer HCQT input (always stride 1 in time)
-    Still with 75 (-1) context frames, i.e. 37 frames padded to each side
-    The number of input channels, channels in the hidden layers, and output
-    dimensions (e.g. for pitch output) can be parameterized.
-    Layer normalization is only performed over frequency and channel dimensions,
-    not over time (in order to work with variable length input).
-    Outputs one channel with sigmoid activation.
+#############
+# New Impls #
+#############
+def init_rate_half(rate):
+    if rate is not None:
+        rate.data.fill_(0.5)
 
-    Args (Defaults: BasicCNN by Johannes Zeitler but with 6 input channels):
-        n_chan_input:     Number of input channels (harmonics in HCQT)
-        n_chan_layers:    Number of channels in the hidden layers (list)
-        n_prefilt_layers: Number of repetitions of the prefiltering layer
-        residual:         If True, use residual connections for prefiltering (default: False)
-        n_bins_in:        Number of input bins (12 * number of octaves)
-        n_bins_out:       Number of output bins (12 for pitch class, 72 for pitch, num_octaves * 12)
-        a_lrelu:          alpha parameter (slope) of LeakyReLU activation function
-        p_dropout:        Dropout probability
+
+def init_rate_0(tensor):
+    if tensor is not None:
+        tensor.data.fill_(0.)
+    return tensor
+
+
+def position(H, W, is_cuda=True):
+    if is_cuda:
+        loc_w = torch.linspace(-1.0, 1.0, W).cuda().unsqueeze(0).repeat(H, 1)
+        loc_h = torch.linspace(-1.0, 1.0, H).cuda().unsqueeze(1).repeat(1, W)
+    else:
+        loc_w = torch.linspace(-1.0, 1.0, W).unsqueeze(0).repeat(H, 1)
+        loc_h = torch.linspace(-1.0, 1.0, H).unsqueeze(1).repeat(1, W)
+    loc = torch.cat([loc_w.unsqueeze(0), loc_h.unsqueeze(0)], 0).unsqueeze(0)
+    return loc
+
+
+def position1d(length):
+    loc = torch.linspace(-1.0, 1.0, length).unsqueeze(0)
+    loc = loc.unsqueeze(0)
+    return loc
+
+
+def stride(x, stride):
+    b, c, w = x.shape
+    return x[:, :, ::stride]
+
+
+class ACmix(nn.Module):
+    def __init__(self, in_planes, out_planes, kernel_att=7, head=4, kernel_conv=3, stride=1, dilation=1):
+        super(ACmix, self).__init__()
+        self.in_planes = in_planes
+        self.out_planes = out_planes
+        self.head = head
+        self.kernel_att = kernel_att
+        self.kernel_conv = kernel_conv
+        self.stride = stride
+        self.dilation = dilation
+        self.rate1 = torch.nn.Parameter(torch.Tensor(1))
+        self.rate2 = torch.nn.Parameter(torch.Tensor(1))
+        self.head_dim = self.out_planes // self.head
+
+        self.conv1 = nn.Conv2d(in_planes, out_planes, kernel_size=1)
+        self.conv2 = nn.Conv2d(in_planes, out_planes, kernel_size=1)
+        self.conv3 = nn.Conv2d(in_planes, out_planes, kernel_size=1)
+        self.conv_p = nn.Conv2d(2, self.head_dim, kernel_size=1)
+
+        self.padding_att = (self.dilation * (self.kernel_att - 1) + 1) // 2
+        self.pad_att = torch.nn.ReflectionPad2d(self.padding_att)
+        self.unfold = nn.Unfold(kernel_size=self.kernel_att, padding=0, stride=self.stride)
+        self.softmax = torch.nn.Softmax(dim=1)
+
+        self.fc = nn.Conv2d(3 * self.head, self.kernel_conv * self.kernel_conv, kernel_size=1, bias=False)
+        self.dep_conv = nn.Conv2d(self.kernel_conv * self.kernel_conv * self.head_dim, out_planes,
+                                  kernel_size=self.kernel_conv, bias=True, groups=self.head_dim, padding=1,
+                                  stride=stride)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        init_rate_half(self.rate1)
+        init_rate_half(self.rate2)
+        kernel = torch.zeros(self.kernel_conv * self.kernel_conv, self.kernel_conv, self.kernel_conv)
+        for i in range(self.kernel_conv * self.kernel_conv):
+            kernel[i, i // self.kernel_conv, i % self.kernel_conv] = 1.
+        kernel = kernel.squeeze(0).repeat(self.out_planes, 1, 1, 1)
+        self.dep_conv.weight = nn.Parameter(data=kernel, requires_grad=True)
+        self.dep_conv.bias = init_rate_0(self.dep_conv.bias)
+
+    def forward(self, x):
+        q, k, v = self.conv1(x), self.conv2(x), self.conv3(x)
+        scaling = float(self.head_dim) ** -0.5
+        b, c, h, w = q.shape
+        h_out, w_out = h // self.stride, w // self.stride
+
+        # ### att
+        # ## positional encoding
+        pe = self.conv_p(position(h, w))
+
+        q_att = q.view(b * self.head, self.head_dim, h, w) * scaling
+        k_att = k.view(b * self.head, self.head_dim, h, w)
+        v_att = v.view(b * self.head, self.head_dim, h, w)
+
+        if self.stride > 1:
+            q_att = stride(q_att, self.stride)
+            q_pe = stride(pe, self.stride)
+        else:
+            q_pe = pe
+
+        unfold_k = self.unfold(self.pad_att(k_att)).view(b * self.head, self.head_dim,
+                                                         self.kernel_att * self.kernel_att, h_out,
+                                                         w_out)  # b*head, head_dim, k_att^2, h_out, w_out
+        unfold_rpe = self.unfold(self.pad_att(pe)).view(1, self.head_dim, self.kernel_att * self.kernel_att, h_out,
+                                                        w_out)  # 1, head_dim, k_att^2, h_out, w_out
+
+        # (b*head, head_dim, 1, h_out, w_out) * (b*head, head_dim, k_att^2, h_out, w_out)
+        #   -> (b*head, k_att^2, h_out, w_out)
+        att = (q_att.unsqueeze(2) * (unfold_k + q_pe.unsqueeze(2) - unfold_rpe)).sum(1)
+        att = self.softmax(att)
+
+        out_att = self.unfold(self.pad_att(v_att)).view(b * self.head, self.head_dim, self.kernel_att * self.kernel_att,
+                                                        h_out, w_out)
+        out_att = (att.unsqueeze(1) * out_att).sum(2).view(b, self.out_planes, h_out, w_out)
+
+        ## conv
+        f_all = self.fc(torch.cat(
+            [q.view(b, self.head, self.head_dim, h * w), k.view(b, self.head, self.head_dim, h * w),
+             v.view(b, self.head, self.head_dim, h * w)], 1))
+        f_conv = f_all.permute(0, 2, 1, 3).reshape(x.shape[0], -1, x.shape[-2], x.shape[-1])
+
+        out_conv = self.dep_conv(f_conv)
+
+        return self.rate1 * out_att + self.rate2 * out_conv
+
+
+def reflection_pad1d(input, padding):
+    """
+    Apply reflection padding to a 1D tensor.
+    Args:
+        input (torch.Tensor): Input tensor of shape (B, C, W)
+        padding (int): Amount of padding on both sides
+    Returns:
+        torch.Tensor: Padded tensor
+    """
+    if padding == 0:
+        return input
+    # Padding left
+    left_pad = input[..., 1:padding + 1].flip(dims=[-1])
+    # Padding right
+    right_pad = input[..., -padding - 1:-1].flip(dims=[-1])
+    # Concatenate along the last dimension
+    return torch.cat([left_pad, input, right_pad], dim=-1)
+
+
+class ACmix1d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_att=7, num_heads=4, conv_kernel_size=3, stride=1, dilation=1):
+        super(ACmix1d, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.num_heads = num_heads
+        self.kernel_att = kernel_att
+        self.conv_kernel_size = conv_kernel_size
+        self.stride = stride
+        self.dilation = dilation
+        self.rate1 = torch.nn.Parameter(torch.Tensor(1))
+        self.rate2 = torch.nn.Parameter(torch.Tensor(1))
+        self.head_dim = self.out_channels // self.num_heads
+
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+        self.conv2 = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+        self.conv3 = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+        self.conv_p = nn.Conv1d(1, self.head_dim, kernel_size=1)
+
+        self.padding_att = (self.dilation * (self.kernel_att - 1) + 1) // 2
+        self.softmax = nn.Softmax(dim=1)
+
+        self.fc = nn.Conv2d(3 * self.num_heads, self.conv_kernel_size, kernel_size=1, bias=False)
+        self.dep_conv = nn.Conv1d(self.conv_kernel_size * self.head_dim, out_channels,
+                                  kernel_size=self.conv_kernel_size, bias=True, groups=self.head_dim, padding=0,
+                                  stride=stride)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        init_rate_half(self.rate1)
+        init_rate_half(self.rate2)
+        kernel = torch.zeros(self.conv_kernel_size, self.conv_kernel_size)
+        for i in range(self.conv_kernel_size):
+            kernel[i, i] = 1.
+        kernel = kernel.unsqueeze(0).repeat(self.out_channels, 1, 1)
+        self.dep_conv.weight = nn.Parameter(data=kernel, requires_grad=True)
+        self.dep_conv.bias = init_rate_0(self.dep_conv.bias)
+
+    def forward(self, x):
+        q, k, v = self.conv1(x), self.conv2(x), self.conv3(x)
+        scaling = float(self.head_dim) ** -0.5
+        b, c, w = q.shape
+        w_out = w // self.stride
+
+        # Positional encoding: head_dim,
+        pe = self.conv_p(position1d(w).to(x.device))
+
+        q_att = q.view(b * self.num_heads, self.head_dim, w) * scaling
+        k_att = k.view(b * self.num_heads, self.head_dim, w)
+        v_att = v.view(b * self.num_heads, self.head_dim, w)
+
+        if self.stride > 1:
+            q_att = stride(q_att, self.stride)
+            q_pe = stride(pe, self.stride)
+        else:
+            q_pe = pe
+
+        # Custom unfold operation for 1D
+        k_att_padded = reflection_pad1d(k_att, self.padding_att)
+        unfold_k = k_att_padded.unfold(dimension=-1, size=self.kernel_att, step=self.stride)
+        unfold_k = unfold_k.permute(0, 1, 3, 2).contiguous()  # b*head, head_dim, k_att, w_out
+
+        pe_padded = reflection_pad1d(pe, self.padding_att)
+        unfold_rpe = pe_padded.unfold(dimension=-1, size=self.kernel_att, step=self.stride)
+        unfold_rpe = unfold_rpe.permute(0, 1, 3, 2).contiguous()
+
+        q_pe = q_pe.unsqueeze(2)
+
+        # Attention calculation
+        q_att = q_att.unsqueeze(2)  # (b * head, head_dim, 1, w_out)
+        att = (q_att * (unfold_k + q_pe - unfold_rpe)).sum(1)  # (b * head, kernel_att, w_out)
+        att = self.softmax(att)
+
+        v_att_padded = reflection_pad1d(v_att, self.padding_att)
+        unfold_v = v_att_padded.unfold(dimension=-1, size=self.kernel_att, step=self.stride)
+        unfold_v = unfold_v.permute(0, 1, 3, 2).contiguous()
+        out_att = (att.unsqueeze(1) * unfold_v).sum(2).view(b, self.out_channels, w_out)
+
+        # Convolution
+        f_all = self.fc(torch.cat(
+            [q.view(b, self.num_heads, self.head_dim, w), k.view(b, self.num_heads, self.head_dim, w),
+             v.view(b, self.num_heads, self.head_dim, w)], 1))
+        f_conv = f_all.permute(0, 2, 1, 3).reshape(x.shape[0], -1, x.shape[-1])
+
+        out_conv = self.dep_conv(f_conv)
+
+        return self.rate1.to(x.device) * out_att + self.rate2.to(x.device) * out_conv
+
+
+class ACResnet1d(nn.Module):
+    """
+    1D ResNet with attention and convolutional blocks.
     """
 
     def __init__(self,
@@ -393,9 +397,7 @@ class Resnet1dWtAttention(nn.Module):
                  output_dim=128,
                  activation_fn: str = "leaky",
                  a_lrelu=0.3,
-                 p_dropout=0.2,
-                 embed_dim=16,
-                 num_heads=4):
+                 p_dropout=0.2):
         super().__init__()
 
         self.hparams = dict(n_chan_input=n_chan_input,
@@ -425,7 +427,6 @@ class Resnet1dWtAttention(nn.Module):
 
         # Layer normalization over frequency and channels (harmonics of HCQT)
         self.layernorm = nn.LayerNorm(normalized_shape=[n_in, n_bins_in])
-        self.n_bins_in = n_bins_in
 
         # Prefiltering
         prefilt_padding = prefilt_kernel_size // 2
@@ -436,6 +437,11 @@ class Resnet1dWtAttention(nn.Module):
                       padding=prefilt_padding,
                       stride=1),
             activation_layer(),
+            ACmix1d(in_channels=n_ch[0],
+                    out_channels=n_ch[0],
+                    kernel_att=3,
+                    num_heads=4,
+                    conv_kernel_size=1),
             nn.Dropout(p=p_dropout)
         )
         self.n_prefilt_layers = n_prefilt_layers
@@ -466,14 +472,9 @@ class Resnet1dWtAttention(nn.Module):
             ])
         self.conv_layers = nn.Sequential(*conv_layers)
 
-        self.proj = nn.Linear(n_ch[-1] * n_bins_in, embed_dim * n_bins_in)
-        # self.attention = MultiHeadAttentionLayer(hid_dim=embed_dim, n_heads=num_heads, dropout=p_dropout)
-        self.attention = RelativeGlobalAttention(d_model=embed_dim, num_heads=num_heads, dropout=p_dropout)
-        self.embed_dim = embed_dim
-
         self.flatten = nn.Flatten(start_dim=1)
-        self.fc = ToeplitzLinear(n_bins_in * embed_dim, output_dim)
-        # self.fc = ToeplitzLinear(n_bins_in * n_ch[-1], output_dim)
+        self.fc = ToeplitzLinear(n_bins_in * n_ch[-1], output_dim)
+
         self.final_norm = nn.Softmax(dim=-1)
 
     def forward(self, x):
@@ -494,16 +495,17 @@ class Resnet1dWtAttention(nn.Module):
                 x = prefilt_layer(x)
 
         x = self.conv_layers(x)
-
-        # Apply MultiheadAttention:
-        x = self.flatten(x)
-        x = self.proj(x)
-        x = x.view(x.size(0), self.embed_dim, self.n_bins_in)
-        x = x.permute(0, 2, 1)  # [batch size, seq len, hid dim]
-        x = self.attention(x)
-
         x = self.flatten(x)
 
         y_pred = self.fc(x)
 
         return self.final_norm(y_pred)
+
+
+if __name__ == '__main__':
+    x = torch.randn(12, 1, 264)
+    model = ACResnet1d(a_lrelu=0.3, activation_fn='leaky', n_bins_in=264,
+                       n_chan_input=1, n_chan_layers=(40, 30, 30, 10, 3),
+                       n_prefilt_layers=2, output_dim=384, p_dropout=0.2,
+                       prefilt_kernel_size=15, residual=True)
+    model.forward(x)
