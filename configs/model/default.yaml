@@ -41,7 +41,7 @@ sce_loss_fn:
 optimizer:
   _target_: torch.optim.Adam
   _partial_: true
-  lr: 1e-3
+  lr: 1e-4
   weight_decay: 0
 
 scheduler:
