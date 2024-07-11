@@ -125,7 +125,7 @@ class ModConvNeXt(nn.Module):
         self.linear = nn.Linear(264, 256)
         self.downsample_layers = nn.ModuleList()  # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
-            nn.Conv2d(in_chans, dims[0], kernel_size=4, stride=4),
+            nn.Conv2d(in_chans, dims[0], kernel_size=2, stride=2),
             LayerNorm(dims[0], eps=1e-6, data_format="channels_first")
         )
         self.downsample_layers.append(stem)
@@ -167,8 +167,10 @@ class ModConvNeXt(nn.Module):
         return self.norm(x.mean([-2, -1]))  # global average pooling, (N, C, H, W) -> (N, C)
 
     def forward(self, x):
-        # x = self.linear(x)
-        x = self.forward_features(x.unsqueeze(2).repeat(1, 1, 264, 1))
+        x = self.linear(x)
+        x = x.reshape(x.size(0), x.size(1), 16, 16)
+        # x = x.unsqueeze(2).repeat(1, 1, 264, 1)
+        x = self.forward_features(x)
         x = self.fc(x)
         return self.final_norm(x)
 
