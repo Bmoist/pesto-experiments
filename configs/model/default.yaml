@@ -3,6 +3,7 @@ _target_: src.models.pesto.PESTO
 encoder:
   _target_: src.models.networks.convnext.ModConvNeXt
   in_chans: ${len:${data.harmonics}}
+  input_dim: ${eval:88 * ${data.bins_per_semitone}}
   output_dim: ${eval:128 * ${data.bins_per_semitone}}
 
 #encoder:

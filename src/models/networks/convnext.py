@@ -14,7 +14,7 @@ from timm.models.layers import trunc_normal_, DropPath
 
 class ToeplitzLinear(nn.Conv1d):
     def __init__(self, in_features, out_features):
-        super(ToeplitzLinear, self).__init__(
+        super().__init__(
             in_channels=1,
             out_channels=1,
             kernel_size=in_features + out_features - 1,
@@ -108,13 +108,14 @@ class ModConvNeXt(nn.Module):
         head_init_scale (float): Init scaling value for classifier weights and biases. Default: 1.
     """
 
-    def __init__(self, in_chans=3, output_dim=1000,
+    def __init__(self, in_chans=3, input_dim=264, output_dim=384,
                  depths=[3, 3, 9, 3], dims=[24, 48, 72, 96], drop_path_rate=0.,
                  layer_scale_init_value=1e-6, head_init_scale=1.,
                  ):
         super().__init__()
 
         self.hparams = dict(in_chans=in_chans,
+                            input_dim=input_dim,
                             output_dim=output_dim,
                             depths=depths,
                             dims=dims,
@@ -122,7 +123,7 @@ class ModConvNeXt(nn.Module):
                             layer_scale_init_value=layer_scale_init_value,
                             head_init_scale=head_init_scale)
 
-        self.linear = nn.Linear(264, 256)
+        self.linear = nn.Linear(input_dim, 256)
         self.downsample_layers = nn.ModuleList()  # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
             nn.Conv2d(in_chans, dims[0], kernel_size=2, stride=2),
@@ -148,7 +149,8 @@ class ModConvNeXt(nn.Module):
             cur += depths[i]
 
         self.norm = nn.LayerNorm(dims[-1], eps=1e-6)  # final norm layer
-        self.fc = nn.Linear(dims[-1], output_dim)
+        # self.fc = nn.Linear(dims[-1], output_dim)
+        self.fc = ToeplitzLinear(dims[-1], output_dim)
 
         self.apply(self._init_weights)
         self.fc.weight.data.mul_(head_init_scale)
@@ -176,7 +178,7 @@ class ModConvNeXt(nn.Module):
 
 
 if __name__ == '__main__':
-    model = ModConvNeXt(in_chans=1, output_dim=384,
+    model = ModConvNeXt(in_chans=1,
                         depths=[3, 3, 9, 3], dims=[24, 48, 72, 96], drop_path_rate=0.,
                         layer_scale_init_value=1e-6, head_init_scale=1.)
     x = torch.randn(12, 1, 264)
