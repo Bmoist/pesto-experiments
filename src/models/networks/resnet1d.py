@@ -1,3 +1,4 @@
+import os
 from functools import partial
 import torch
 import torch.nn as nn
@@ -186,6 +187,29 @@ def stride(x, stride):
     return x[:, :, ::stride]
 
 
+def manual_unfold_1d(tensor, kernel_size, stride=1, padding=0):
+    # Apply padding if needed
+    if padding > 0:
+        tensor = F.pad(tensor, (padding, padding))
+
+    batch_size, channels, length = tensor.shape
+    out_length = (length - kernel_size) // stride + 1
+
+    # Prepare a list to collect slices
+    slices = []
+
+    for i in range(0, out_length * stride, stride):
+        slices.append(tensor[:, :, i:i + kernel_size].unsqueeze(-1))
+
+    # Concatenate slices along the new dimension
+    unfolded = torch.cat(slices, dim=-1)
+
+    # Reshape to match expected output format
+    unfolded = unfolded.permute(0, 1, 3, 2).contiguous()
+
+    return unfolded
+
+
 class ACmix(nn.Module):
     def __init__(self, in_planes, out_planes, kernel_att=7, head=4, kernel_conv=3, stride=1, dilation=1):
         super(ACmix, self).__init__()
@@ -352,11 +376,13 @@ class ACmix1d(nn.Module):
 
         # Custom unfold operation for 1D
         k_att_padded = reflection_pad1d(k_att, self.padding_att)
-        unfold_k = k_att_padded.unfold(dimension=-1, size=self.kernel_att, step=self.stride)
+        # unfold_k = k_att_padded.unfold(dimension=-1, size=self.kernel_att, step=self.stride)
+        unfold_k = manual_unfold_1d(k_att_padded, self.kernel_att, self.stride)
         unfold_k = unfold_k.permute(0, 1, 3, 2).contiguous()  # b*head, head_dim, k_att, w_out
 
         pe_padded = reflection_pad1d(pe, self.padding_att)
-        unfold_rpe = pe_padded.unfold(dimension=-1, size=self.kernel_att, step=self.stride)
+        # unfold_rpe = pe_padded.unfold(dimension=-1, size=self.kernel_att, step=self.stride)
+        unfold_rpe = manual_unfold_1d(pe_padded, self.kernel_att, self.stride)
         unfold_rpe = unfold_rpe.permute(0, 1, 3, 2).contiguous()
 
         q_pe = q_pe.unsqueeze(2)
@@ -367,7 +393,8 @@ class ACmix1d(nn.Module):
         att = self.softmax(att)
 
         v_att_padded = reflection_pad1d(v_att, self.padding_att)
-        unfold_v = v_att_padded.unfold(dimension=-1, size=self.kernel_att, step=self.stride)
+        # unfold_v = v_att_padded.unfold(dimension=-1, size=self.kernel_att, step=self.stride)
+        unfold_v = manual_unfold_1d(v_att_padded, self.kernel_att, self.stride)
         unfold_v = unfold_v.permute(0, 1, 3, 2).contiguous()
         out_att = (att.unsqueeze(1) * unfold_v).sum(2).view(b, self.out_channels, w_out)
 
@@ -503,6 +530,7 @@ class ACResnet1d(nn.Module):
 
 
 if __name__ == '__main__':
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
     x = torch.randn(12, 1, 264)
     model = ACResnet1d(a_lrelu=0.3, activation_fn='leaky', n_bins_in=264,
                        n_chan_input=1, n_chan_layers=(40, 30, 30, 10, 3),
