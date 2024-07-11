@@ -1,19 +1,24 @@
 _target_: src.models.pesto.PESTO
 
 encoder:
-  _target_: src.models.networks.resnet1d.ACResnet1d
-  n_chan_input: ${len:${data.harmonics}}
-  n_chan_layers:
-    - 40
-    - 30
-    - 30
-    - 10
-    - 3
-  n_prefilt_layers: 2
-  prefilt_kernel_size: 15
-  residual: true
-  n_bins_in: ${eval:88 * ${data.bins_per_semitone}}
+  _target_: src.models.networks.convnext.ModConvNeXt
+  in_chans: ${len:${data.harmonics}}
   output_dim: ${eval:128 * ${data.bins_per_semitone}}
+
+#encoder:
+#  _target_: src.models.networks.resnet1d.Resnet1d
+#  n_chan_input: ${len:${data.harmonics}}
+#  n_chan_layers:
+#    - 40
+#    - 30
+#    - 30
+#    - 10
+#    - 3
+#  n_prefilt_layers: 2
+#  prefilt_kernel_size: 15
+#  residual: true
+#  n_bins_in: ${eval:88 * ${data.bins_per_semitone}}
+#  output_dim: ${eval:128 * ${data.bins_per_semitone}}
 
 equiv_loss_fn:
   _target_: src.losses.equivariance.PowerSeries
@@ -35,7 +40,7 @@ sce_loss_fn:
 optimizer:
   _target_: torch.optim.Adam
   _partial_: true
-  lr: 1e-4
+  lr: 1e-3
   weight_decay: 0
 
 scheduler:
