@@ -46,7 +46,7 @@ class PowerSeries(nn.Module):
 
         # compute equivariant loss
         loss_12 = self.loss_fn(z2 / z1 - freq_ratios).mean()
-        loss_21 = self.loss_fn(z1 / z2 - 1/freq_ratios).mean()
+        loss_21 = self.loss_fn(z1 / z2 - 1 / freq_ratios).mean()
 
         return (loss_12 + loss_21) / 2
 

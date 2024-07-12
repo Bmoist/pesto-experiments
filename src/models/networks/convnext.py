@@ -342,8 +342,8 @@ class Blk(nn.Module):
         #               kernel_size=15,
         #               padding=7,
         #               stride=1),
-        #     nn.LeakyReLU(0.3),
-        #     nn.Dropout(p=0.1)
+        #     nn.Mish(),
+        #     nn.Dropout(p=0.2)
         # )
 
     def forward(self, x):
