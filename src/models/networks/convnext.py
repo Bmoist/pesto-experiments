@@ -270,9 +270,8 @@ class ConvNeXt1D(nn.Module):
         stem = nn.Sequential(
             nn.Conv1d(in_chans, dims[0], kernel_size=15,
                       padding=7, stride=1),
-            nn.LeakyReLU(0.2),
             LayerNorm1D(dims[0], eps=1e-6, data_format="channels_first"),
-            nn.Dropout(0.1)
+            nn.Dropout(0.2)
         )
         self.downsample_layers.append(stem)
         for i in range(len(dims) - 1):
