@@ -536,4 +536,5 @@ if __name__ == '__main__':
                        n_chan_input=1, n_chan_layers=(40, 30, 30, 10, 3),
                        n_prefilt_layers=2, output_dim=384, p_dropout=0.2,
                        prefilt_kernel_size=15, residual=True)
-    model.forward(x)
+    result = model.forward(x)
+    print(torch.argmax(result, dim=1))
