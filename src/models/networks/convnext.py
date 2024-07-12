@@ -9,6 +9,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from itertools import repeat
 from timm.models.layers import trunc_normal_, DropPath
 
 
@@ -71,7 +72,8 @@ class Block1D(nn.Module):
         super().__init__()
         self.dwconv = nn.Conv1d(dim, dim, kernel_size=15, padding=7, groups=dim)  # depthwise conv
         self.norm = LayerNorm1D(dim, eps=1e-6)
-        self.pwconv1 = nn.Conv1d(dim, 4 * dim, kernel_size=3, padding=1)  # pointwise/1x1 convs, implemented with linear layers
+        self.pwconv1 = nn.Conv1d(dim, 4 * dim, kernel_size=3,
+                                 padding=1)  # pointwise/1x1 convs, implemented with linear layers
         # self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
         self.act = nn.GELU()
         self.pwconv2 = nn.Conv1d(4 * dim, dim, kernel_size=3, padding=1)
@@ -381,7 +383,7 @@ class Cxt(nn.Module):
         self.conv1 = nn.Sequential(
             nn.Conv1d(in_chans, dims[0], kernel_size=15,
                       padding=7, stride=1),
-            nn.ReLU(0.2),
+            nn.Mish(),
             nn.Dropout(0.1)
         )
 
@@ -437,9 +439,163 @@ class Cxt(nn.Module):
         return self.final_norm(x)
 
 
+class SpatialDropout(nn.Module):
+    def __init__(self, drop=0.3):
+        super().__init__()
+        self.drop = drop
+
+    def forward(self, inputs):
+        outputs = inputs.clone()
+        self.noise_shape = (inputs.shape[0], *repeat(1, inputs.dim() - 2), inputs.shape[-1])
+        noises = self._make_noise(inputs)
+        noises.bernoulli_(1 - self.drop).div_(1 - self.drop)
+        noises = noises.expand_as(inputs)
+        outputs.mul_(noises)
+        return outputs
+
+    def _make_noise(self, inputs):
+        return inputs.new().resize_(self.noise_shape)
+
+
+class ResCNext(nn.Module):
+    """
+    Basic CNN similar to the one in Johannes Zeitler's report,
+    but for longer HCQT input (always stride 1 in time)
+    Still with 75 (-1) context frames, i.e. 37 frames padded to each side
+    The number of input channels, channels in the hidden layers, and output
+    dimensions (e.g. for pitch output) can be parameterized.
+    Layer normalization is only performed over frequency and channel dimensions,
+    not over time (in order to work with variable length input).
+    Outputs one channel with sigmoid activation.
+
+    Args (Defaults: BasicCNN by Johannes Zeitler but with 6 input channels):
+        n_chan_input:     Number of input channels (harmonics in HCQT)
+        n_chan_layers:    Number of channels in the hidden layers (list)
+        n_prefilt_layers: Number of repetitions of the prefiltering layer
+        residual:         If True, use residual connections for prefiltering (default: False)
+        n_bins_in:        Number of input bins (12 * number of octaves)
+        n_bins_out:       Number of output bins (12 for pitch class, 72 for pitch, num_octaves * 12)
+        a_lrelu:          alpha parameter (slope) of LeakyReLU activation function
+        p_dropout:        Dropout probability
+    """
+
+    def __init__(self,
+                 n_chan_input=1,
+                 n_chan_layers=(20, 20, 10, 1),
+                 n_prefilt_layers=1,
+                 prefilt_kernel_size=15,
+                 residual=False,
+                 n_bins_in=216,
+                 output_dim=128,
+                 activation_fn: str = "leaky",
+                 a_lrelu=0.3,
+                 p_dropout=0.2):
+        super().__init__()
+
+        self.hparams = dict(n_chan_input=n_chan_input,
+                            n_chan_layers=n_chan_layers,
+                            n_prefilt_layers=n_prefilt_layers,
+                            prefilt_kernel_size=prefilt_kernel_size,
+                            residual=residual,
+                            n_bins_in=n_bins_in,
+                            output_dim=output_dim,
+                            activation_fn=activation_fn,
+                            a_lrelu=a_lrelu,
+                            p_dropout=p_dropout)
+
+        # if activation_fn == "relu":
+        #     activation_layer = nn.ReLU
+        # elif activation_fn == "silu":
+        #     activation_layer = nn.SiLU
+        # elif activation_fn == "leaky":
+        #     activation_layer = partial(nn.LeakyReLU, negative_slope=a_lrelu)
+        # else:
+        #     raise ValueError
+        activation_layer = nn.Mish
+
+        n_in = n_chan_input
+        n_ch = n_chan_layers
+        if len(n_ch) < 5:
+            n_ch.append(1)
+
+        # Layer normalization over frequency and channels (harmonics of HCQT)
+        self.layernorm = nn.LayerNorm(normalized_shape=[n_in, n_bins_in])
+
+        # Prefiltering
+        prefilt_padding = prefilt_kernel_size // 2
+        self.conv1 = nn.Sequential(
+            nn.Conv1d(in_channels=n_in,
+                      out_channels=n_ch[0],
+                      kernel_size=prefilt_kernel_size,
+                      padding=prefilt_padding,
+                      stride=1),
+            activation_layer(),
+            nn.Dropout(p=p_dropout)
+        )
+        self.n_prefilt_layers = n_prefilt_layers
+        self.prefilt_layers = nn.ModuleList(*[
+            nn.Sequential(
+                Blk(dim=n_ch[0], drop_path=p_dropout),
+                # nn.Conv1d(in_channels=n_ch[0],
+                #           out_channels=n_ch[0],
+                #           kernel_size=prefilt_kernel_size,
+                #           padding=prefilt_padding,
+                #           stride=1),
+                # activation_layer(),
+                nn.Dropout(p=p_dropout)
+            )
+            for _ in range(n_prefilt_layers - 1)
+        ])
+        self.residual = residual
+
+        conv_layers = []
+        for i in range(len(n_chan_layers) - 1):
+            conv_layers.extend([
+                nn.Conv1d(in_channels=n_ch[i],
+                          out_channels=n_ch[i + 1],
+                          kernel_size=1,
+                          padding=0,
+                          stride=1),
+                activation_layer(),
+                nn.Dropout(p=p_dropout)
+            ])
+        self.conv_layers = nn.Sequential(*conv_layers)
+
+        self.flatten = nn.Flatten(start_dim=1)
+        self.fc = ToeplitzLinear(n_bins_in * n_ch[-1], output_dim)
+
+        self.final_norm = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        r"""
+
+        Args:
+            x (torch.Tensor): shape (batch, channels, freq_bins)
+        """
+        x = self.layernorm(x)
+
+        x = self.conv1(x)
+        for p in range(0, self.n_prefilt_layers - 1):
+            prefilt_layer = self.prefilt_layers[p]
+            if self.residual:
+                x_new = prefilt_layer(x)
+                x = x_new + x
+            else:
+                x = prefilt_layer(x)
+
+        x = self.conv_layers(x)
+        x = self.flatten(x)
+
+        y_pred = self.fc(x)
+
+        return self.final_norm(y_pred)
+
+
 if __name__ == '__main__':
-    model = ConvNeXt1D(in_chans=1, drop_path_rate=0.2,
-                layer_scale_init_value=1e-6, head_init_scale=1.)
+    model = ResCNext(a_lrelu=0.3, activation_fn='leaky', n_bins_in=264,
+                     n_chan_input=1, n_chan_layers=(40, 30, 30, 10, 3),
+                     n_prefilt_layers=2, output_dim=384, p_dropout=0.2,
+                     prefilt_kernel_size=15, residual=True)
     x = torch.randn(12, 1, 264)
     result = model.forward(x)
     print(torch.argmax(result, dim=1))
