@@ -69,12 +69,12 @@ class Block1D(nn.Module):
 
     def __init__(self, dim, drop_path=0., layer_scale_init_value=1e-6):
         super().__init__()
-        self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
+        self.dwconv = nn.Conv1d(dim, dim, kernel_size=15, padding=7, groups=dim)  # depthwise conv
         self.norm = LayerNorm1D(dim, eps=1e-6)
-        self.pwconv1 = nn.Conv1d(dim, 4 * dim, kernel_size=1)  # pointwise/1x1 convs, implemented with linear layers
+        self.pwconv1 = nn.Conv1d(dim, 4 * dim, kernel_size=3, padding=1)  # pointwise/1x1 convs, implemented with linear layers
         # self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
         self.act = nn.GELU()
-        self.pwconv2 = nn.Conv1d(4 * dim, dim, kernel_size=1)
+        self.pwconv2 = nn.Conv1d(4 * dim, dim, kernel_size=3, padding=1)
         # self.pwconv2 = nn.Linear(4 * dim, dim)
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)),
                                   requires_grad=True) if layer_scale_init_value > 0 else None
@@ -253,7 +253,7 @@ class ConvNeXt1D(nn.Module):
     """
 
     def __init__(self, in_chans=1, input_dim=264, output_dim=384,
-                 depths=[3, 3, 9, 3], dims=[24, 36, 48, 72], drop_path_rate=0.3,
+                 depths=[3, 3, 9, 3], dims=[40, 30, 30, 10], drop_path_rate=0.3,
                  layer_scale_init_value=1e-6, head_init_scale=1.,
                  ):
         super().__init__()
@@ -268,7 +268,7 @@ class ConvNeXt1D(nn.Module):
                             head_init_scale=head_init_scale)
         self.downsample_layers = nn.ModuleList()  # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
-            nn.Conv1d(in_chans, dims[0], kernel_size=14,
+            nn.Conv1d(in_chans, dims[0], kernel_size=15,
                       padding=7, stride=1),
             nn.LeakyReLU(0.2),
             LayerNorm1D(dims[0], eps=1e-6, data_format="channels_first"),
@@ -278,28 +278,28 @@ class ConvNeXt1D(nn.Module):
         for i in range(len(dims) - 1):
             downsample_layer = nn.Sequential(
                 LayerNorm1D(dims[i], eps=1e-6, data_format="channels_first"),
-                nn.Conv1d(dims[i], dims[i + 1], kernel_size=14, padding=7, stride=2),
+                nn.Conv1d(dims[i], dims[i + 1], kernel_size=15, padding=7, stride=1),
                 nn.LeakyReLU(0.2),
             )
             self.downsample_layers.append(downsample_layer)
 
-        # self.stages = nn.ModuleList()  # 4 feature resolution stages, each consisting of multiple residual blocks
-        # dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
-        # cur = 0
-        # for i in range(len(dims)):
-        #     stage = nn.Sequential(
-        #         *[Block1D(dim=dims[i], drop_path=dp_rates[cur + j],
-        #                   layer_scale_init_value=layer_scale_init_value) for j in range(depths[i])]
-        #     )
-        #     self.stages.append(stage)
-        #     cur += depths[i]
+        self.stages = nn.ModuleList()  # 4 feature resolution stages, each consisting of multiple residual blocks
+        dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+        cur = 0
+        for i in range(len(dims)):
+            stage = nn.Sequential(
+                *[Block1D(dim=dims[i], drop_path=dp_rates[cur + j],
+                          layer_scale_init_value=layer_scale_init_value) for j in range(depths[i])]
+            )
+            self.stages.append(stage)
+            cur += depths[i]
 
         self.norm = nn.LayerNorm(dims[-1], eps=1e-6)  # final norm layer
         # self.fc = nn.Linear(dims[-1], output_dim)
         # self.fc.weight.data.mul_(head_init_scale)
         # self.fc.bias.data.mul_(head_init_scale)
 
-        self.fc = ToeplitzLinear(2448, output_dim)
+        self.fc = ToeplitzLinear(2640, output_dim)
         self.flatten = nn.Flatten(start_dim=1)
         self.apply(self._init_weights)
         self.final_norm = nn.Softmax(dim=-1)
@@ -312,7 +312,7 @@ class ConvNeXt1D(nn.Module):
     def forward_features(self, x):
         for i in range(len(self.downsample_layers)):
             x = self.downsample_layers[i](x)
-            # x = self.stages[i](x)
+            x = self.stages[i](x)
         return torch.flatten(x, start_dim=1)
 
     def forward(self, x):
@@ -324,43 +324,43 @@ class ConvNeXt1D(nn.Module):
 class Blk(nn.Module):
     def __init__(self, dim, drop_path=0., layer_scale_init_value=1e-6):
         super().__init__()
-        # self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
-        # self.norm = LayerNorm1D(dim, eps=1e-6)
-        # self.pwconv1 = nn.Conv1d(dim, 4 * dim, kernel_size=1)  # pointwise/1x1 convs, implemented with linear layers
-        # # self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
-        # self.act = nn.GELU()
-        # self.pwconv2 = nn.Conv1d(4 * dim, dim, kernel_size=1)
-        # # self.pwconv2 = nn.Linear(4 * dim, dim)
-        # self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)),
-        #                           requires_grad=True) if layer_scale_init_value > 0 else None
-        # self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.dwconv = nn.Conv1d(dim, dim, kernel_size=15, padding=7, groups=dim)  # depthwise conv
+        self.norm = LayerNorm1D(dim, eps=1e-6)
+        self.pwconv1 = nn.Conv1d(dim, 4 * dim, kernel_size=1)  # pointwise/1x1 convs, implemented with linear layers
+        # self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
+        self.act = nn.Mish()
+        self.pwconv2 = nn.Conv1d(4 * dim, dim, kernel_size=1)
+        # self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)),
+                                  requires_grad=True) if layer_scale_init_value > 0 else None
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-        self.conv = nn.Sequential(
-            nn.Conv1d(in_channels=dim,
-                      out_channels=dim,
-                      kernel_size=15,
-                      padding=7,
-                      stride=1),
-            nn.LeakyReLU(0.3),
-            nn.Dropout(p=0.1)
-        )
+        # self.conv = nn.Sequential(
+        #     nn.Conv1d(in_channels=dim,
+        #               out_channels=dim,
+        #               kernel_size=15,
+        #               padding=7,
+        #               stride=1),
+        #     nn.LeakyReLU(0.3),
+        #     nn.Dropout(p=0.1)
+        # )
 
     def forward(self, x):
-        # input = x
-        #
-        # x = self.dwconv(x)
-        # x = x.permute(0, 2, 1)  # (N, C, L) -> (N, L, C)
-        # x = self.norm(x)
-        # x = self.pwconv1(x.permute(0, 2, 1))
-        # x = self.act(x)
-        # x = self.pwconv2(x)
-        # x = x.permute(0, 2, 1)
-        # if self.gamma is not None:
-        #     x = self.gamma * x
-        # x = x.permute(0, 2, 1)  # (N, L, C) -> (N, C, L)
-        # x = input + self.drop_path(x)
+        input = x
 
-        x = x + self.conv(x)
+        x = self.dwconv(x)
+        x = x.permute(0, 2, 1)  # (N, C, L) -> (N, L, C)
+        x = self.norm(x)
+        x = self.pwconv1(x.permute(0, 2, 1))
+        x = self.act(x)
+        x = self.pwconv2(x)
+        x = x.permute(0, 2, 1)
+        if self.gamma is not None:
+            x = self.gamma * x
+        x = x.permute(0, 2, 1)  # (N, L, C) -> (N, C, L)
+        x = input + self.drop_path(x)
+
+        # x = x + self.conv(x)
         return x
 
 
@@ -382,7 +382,7 @@ class Cxt(nn.Module):
         self.conv1 = nn.Sequential(
             nn.Conv1d(in_chans, dims[0], kernel_size=15,
                       padding=7, stride=1),
-            nn.LeakyReLU(0.2),
+            nn.ReLU(0.2),
             nn.Dropout(0.1)
         )
 
@@ -439,8 +439,7 @@ class Cxt(nn.Module):
 
 
 if __name__ == '__main__':
-    model = Cxt(in_chans=1,
-                depths=[3, 3, 3, 3, 3], dims=[40, 30, 30, 10, 3], drop_path_rate=0.2,
+    model = ConvNeXt1D(in_chans=1, drop_path_rate=0.2,
                 layer_scale_init_value=1e-6, head_init_scale=1.)
     x = torch.randn(12, 1, 264)
     result = model.forward(x)
