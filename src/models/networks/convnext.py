@@ -383,7 +383,7 @@ class Cxt(nn.Module):
         self.conv1 = nn.Sequential(
             nn.Conv1d(in_chans, dims[0], kernel_size=15,
                       padding=7, stride=1),
-            nn.Mish(),
+            nn.ReLU(),
             nn.Dropout(0.1)
         )
 
@@ -437,24 +437,6 @@ class Cxt(nn.Module):
 
         x = self.fc(x)
         return self.final_norm(x)
-
-
-class SpatialDropout(nn.Module):
-    def __init__(self, drop=0.3):
-        super().__init__()
-        self.drop = drop
-
-    def forward(self, inputs):
-        outputs = inputs.clone()
-        self.noise_shape = (inputs.shape[0], *repeat(1, inputs.dim() - 2), inputs.shape[-1])
-        noises = self._make_noise(inputs)
-        noises.bernoulli_(1 - self.drop).div_(1 - self.drop)
-        noises = noises.expand_as(inputs)
-        outputs.mul_(noises)
-        return outputs
-
-    def _make_noise(self, inputs):
-        return inputs.new().resize_(self.noise_shape)
 
 
 class ResCNext(nn.Module):
@@ -577,11 +559,7 @@ class ResCNext(nn.Module):
         x = self.conv1(x)
         for p in range(0, self.n_prefilt_layers - 1):
             prefilt_layer = self.prefilt_layers[p]
-            if self.residual:
-                x_new = prefilt_layer(x)
-                x = x_new + x
-            else:
-                x = prefilt_layer(x)
+            x = prefilt_layer(x)
 
         x = self.conv_layers(x)
         x = self.flatten(x)
