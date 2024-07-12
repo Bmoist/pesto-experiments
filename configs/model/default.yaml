@@ -1,32 +1,32 @@
 _target_: src.models.pesto.PESTO
 
-encoder:
-  _target_: src.models.networks.convnext.Cxt
-  in_chans: ${len:${data.harmonics}}
-  input_dim: ${eval:88 * ${data.bins_per_semitone}}
-  output_dim: ${eval:128 * ${data.bins_per_semitone}}
-
 #encoder:
-#  _target_: src.models.networks.convnext.ResCNext
-#  n_chan_input: ${len:${data.harmonics}}
-#  n_chan_layers:
-#    - 40
-#    - 30
-#    - 30
-#    - 10
-#    - 3
-#  n_prefilt_layers: 2
-#  prefilt_kernel_size: 15
-#  residual: true
-#  n_bins_in: ${eval:88 * ${data.bins_per_semitone}}
+#  _target_: src.models.networks.convnext.Cxt
+#  in_chans: ${len:${data.harmonics}}
+#  input_dim: ${eval:88 * ${data.bins_per_semitone}}
 #  output_dim: ${eval:128 * ${data.bins_per_semitone}}
 
-equiv_loss_fn:
-  _target_: src.losses.equivariance.PowerSeries
-  value: 1.019440644  # 2 ** (1/36)
-  power_min: ${eval:${model.equiv_loss_fn.power_max} - ${model.encoder.output_dim}}
-  power_max: 1
-  tau: 0.122462048  # 2 ** (1/6) - 1
+encoder:
+  _target_: src.models.networks.resnet1d.ACResnet1d
+  n_chan_input: ${len:${data.harmonics}}
+  n_chan_layers:
+    - 40
+    - 30
+    - 30
+    - 10
+    - 3
+  n_prefilt_layers: 2
+  prefilt_kernel_size: 15
+  residual: true
+  n_bins_in: ${eval:88 * ${data.bins_per_semitone}}
+  output_dim: ${eval:128 * ${data.bins_per_semitone}}
+
+#equiv_loss_fn:
+#  _target_: src.losses.equivariance.PowerSeries
+#  value: 1.019440644  # 2 ** (1/36)
+#  power_min: ${eval:${model.equiv_loss_fn.power_max} - ${model.encoder.output_dim}}
+#  power_max: 1
+#  tau: 0.122462048  # 2 ** (1/6) - 1
 
 inv_loss_fn:
   _target_: src.losses.entropy.CrossEntropyLoss

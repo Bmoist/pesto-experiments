@@ -10,10 +10,11 @@ class HuberLoss(nn.Module):
         self.register_buffer("tau", torch.tensor(tau), persistent=False)
 
     def forward(self, x):
-        x = x.abs()
-        return torch.where(x.le(self.tau),
-                           x ** 2 / 2,
-                           self.tau ** 2 / 2 + self.tau * (x - self.tau))
+        return torch.zeros_like(x)
+        # x = x.abs()
+        # return torch.where(x.le(self.tau),
+        #                    x ** 2 / 2,
+        #                    self.tau ** 2 / 2 + self.tau * (x - self.tau))
 
 
 class PowerSeries(nn.Module):

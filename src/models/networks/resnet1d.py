@@ -438,14 +438,15 @@ class ACResnet1d(nn.Module):
                             a_lrelu=a_lrelu,
                             p_dropout=p_dropout)
 
-        if activation_fn == "relu":
-            activation_layer = nn.ReLU
-        elif activation_fn == "silu":
-            activation_layer = nn.SiLU
-        elif activation_fn == "leaky":
-            activation_layer = partial(nn.LeakyReLU, negative_slope=a_lrelu)
-        else:
-            raise ValueError
+        # if activation_fn == "relu":
+        #     activation_layer = nn.ReLU
+        # elif activation_fn == "silu":
+        #     activation_layer = nn.SiLU
+        # elif activation_fn == "leaky":
+        #     activation_layer = partial(nn.LeakyReLU, negative_slope=a_lrelu)
+        # else:
+        #     raise ValueError
+        activation_layer = nn.Mish
 
         n_in = n_chan_input
         n_ch = n_chan_layers
