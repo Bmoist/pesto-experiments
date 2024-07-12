@@ -329,7 +329,7 @@ class Blk(nn.Module):
         self.norm = LayerNorm1D(dim, eps=1e-6)
         self.pwconv1 = nn.Conv1d(dim, 4 * dim, kernel_size=1)  # pointwise/1x1 convs, implemented with linear layers
         # self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
-        self.act = nn.Mish()
+        self.act = nn.GELU()
         self.pwconv2 = nn.Conv1d(4 * dim, dim, kernel_size=1)
         # self.pwconv2 = nn.Linear(4 * dim, dim)
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)),
@@ -342,8 +342,8 @@ class Blk(nn.Module):
         #               kernel_size=15,
         #               padding=7,
         #               stride=1),
-        #     nn.LeakyReLU(0.3),
-        #     nn.Dropout(p=0.1)
+        #     nn.Mish(),
+        #     nn.Dropout(p=0.2)
         # )
 
     def forward(self, x):
