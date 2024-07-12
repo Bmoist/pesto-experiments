@@ -66,16 +66,6 @@ class Block(nn.Module):
 
 
 class Block1D(nn.Module):
-    r""" ConvNeXt Block. There are two equivalent implementations:
-    (1) DwConv -> LayerNorm (channels_first) -> 1x1 Conv -> GELU -> 1x1 Conv; all in (N, C, H, W)
-    (2) DwConv -> Permute to (N, H, W, C); LayerNorm (channels_last) -> Linear -> GELU -> Linear; Permute back
-    We use (2) as we find it slightly faster in PyTorch
-
-    Args:
-        dim (int): Number of input channels.
-        drop_path (float): Stochastic depth rate. Default: 0.0
-        layer_scale_init_value (float): Init value for Layer Scale. Default: 1e-6.
-    """
 
     def __init__(self, dim, drop_path=0., layer_scale_init_value=1e-6):
         super().__init__()
@@ -331,10 +321,127 @@ class ConvNeXt1D(nn.Module):
         return self.final_norm(x)
 
 
+class Blk(nn.Module):
+    def __init__(self, dim, drop_path=0., layer_scale_init_value=1e-6):
+        super().__init__()
+        # self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
+        # self.norm = LayerNorm1D(dim, eps=1e-6)
+        # self.pwconv1 = nn.Conv1d(dim, 4 * dim, kernel_size=1)  # pointwise/1x1 convs, implemented with linear layers
+        # # self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
+        # self.act = nn.GELU()
+        # self.pwconv2 = nn.Conv1d(4 * dim, dim, kernel_size=1)
+        # # self.pwconv2 = nn.Linear(4 * dim, dim)
+        # self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)),
+        #                           requires_grad=True) if layer_scale_init_value > 0 else None
+        # self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        self.conv = nn.Sequential(
+            nn.Conv1d(in_channels=dim,
+                      out_channels=dim,
+                      kernel_size=15,
+                      padding=7,
+                      stride=1),
+            nn.LeakyReLU(0.3),
+            nn.Dropout(p=0.1)
+        )
+
+    def forward(self, x):
+        # input = x
+        #
+        # x = self.dwconv(x)
+        # x = x.permute(0, 2, 1)  # (N, C, L) -> (N, L, C)
+        # x = self.norm(x)
+        # x = self.pwconv1(x.permute(0, 2, 1))
+        # x = self.act(x)
+        # x = self.pwconv2(x)
+        # x = x.permute(0, 2, 1)
+        # if self.gamma is not None:
+        #     x = self.gamma * x
+        # x = x.permute(0, 2, 1)  # (N, L, C) -> (N, C, L)
+        # x = input + self.drop_path(x)
+
+        x = x + self.conv(x)
+        return x
+
+
+class Cxt(nn.Module):
+    def __init__(self, in_chans=1, input_dim=264, output_dim=384,
+                 depths=[1, 1, 1, 1, 1], dims=[40, 30, 30, 10, 3], drop_path_rate=0.3,
+                 layer_scale_init_value=1e-6, head_init_scale=1.,
+                 ):
+        super().__init__()
+
+        self.hparams = dict(in_chans=in_chans,
+                            input_dim=input_dim,
+                            output_dim=output_dim,
+                            depths=depths,
+                            dims=dims,
+                            drop_path_rate=drop_path_rate,
+                            layer_scale_init_value=layer_scale_init_value,
+                            head_init_scale=head_init_scale)
+        self.conv1 = nn.Sequential(
+            nn.Conv1d(in_chans, dims[0], kernel_size=15,
+                      padding=7, stride=1),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.1)
+        )
+
+        self.stages = nn.ModuleList()  # 4 feature resolution stages, each consisting of multiple residual blocks
+        cur = 0
+        dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+        for i in range(1):
+            stage = nn.Sequential(
+                *[
+                    Blk(dim=dims[i], drop_path=dp_rates[cur + j],
+                        layer_scale_init_value=layer_scale_init_value)
+                    for j in range(depths[i])
+                ]
+            )
+            self.stages.append(stage)
+            cur += depths[i]
+
+        conv_layers = []
+        for i in range(len(dims) - 1):
+            conv_layers.extend([
+                nn.Conv1d(in_channels=dims[i],
+                          out_channels=dims[i + 1],
+                          kernel_size=1,
+                          padding=0,
+                          stride=1),
+                nn.LeakyReLU(0.2),
+                nn.Dropout(p=0.1)
+            ])
+        self.conv_layers = nn.Sequential(*conv_layers)
+
+        self.layernorm = nn.LayerNorm(normalized_shape=[in_chans, input_dim])
+        self.flatten = nn.Flatten(start_dim=1)
+
+        self.fc = ToeplitzLinear(dims[-1] * input_dim, output_dim)
+        self.final_norm = nn.Softmax(dim=-1)
+
+    def forward_features(self, x):
+        x = self.conv1(x)
+        for i in range(len(self.stages)):
+            x = self.stages[i](x)
+        return x
+
+    def forward(self, x):
+        x = self.layernorm(x)
+
+        x = self.forward_features(x)
+
+        x = self.conv_layers(x)
+
+        x = self.flatten(x)
+
+        x = self.fc(x)
+        return self.final_norm(x)
+
+
 if __name__ == '__main__':
-    model = ConvNeXt1D(in_chans=1,
-                       depths=[3, 3, 9, 3], dims=[24, 36, 48, 72], drop_path_rate=0.2,
-                       layer_scale_init_value=1e-6, head_init_scale=1.)
+    model = Cxt(in_chans=1,
+                depths=[3, 3, 3, 3, 3], dims=[40, 30, 30, 10, 3], drop_path_rate=0.2,
+                layer_scale_init_value=1e-6, head_init_scale=1.)
     x = torch.randn(12, 1, 264)
     result = model.forward(x)
     print(torch.argmax(result, dim=1))

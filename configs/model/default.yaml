@@ -1,13 +1,13 @@
 _target_: src.models.pesto.PESTO
 
 encoder:
-  _target_: src.models.networks.convnext.ConvNeXt1D
+  _target_: src.models.networks.convnext.Cxt
   in_chans: ${len:${data.harmonics}}
   input_dim: ${eval:88 * ${data.bins_per_semitone}}
   output_dim: ${eval:128 * ${data.bins_per_semitone}}
 
 #encoder:
-#  _target_: src.models.networks.resnet1d.Resnet1d
+#  _target_: src.models.networks.resplus.Resnet1d
 #  n_chan_input: ${len:${data.harmonics}}
 #  n_chan_layers:
 #    - 40
