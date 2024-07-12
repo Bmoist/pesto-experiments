@@ -383,7 +383,7 @@ class Cxt(nn.Module):
         self.conv1 = nn.Sequential(
             nn.Conv1d(in_chans, dims[0], kernel_size=15,
                       padding=7, stride=1),
-            nn.ReLU(),
+            nn.Mish(),
             nn.Dropout(0.1)
         )
 
@@ -409,7 +409,7 @@ class Cxt(nn.Module):
                           kernel_size=1,
                           padding=0,
                           stride=1),
-                nn.LeakyReLU(0.2),
+                nn.Mish(),
                 nn.Dropout(p=0.1)
             ])
         self.conv_layers = nn.Sequential(*conv_layers)
@@ -515,17 +515,8 @@ class ResCNext(nn.Module):
             nn.Dropout(p=p_dropout)
         )
         self.n_prefilt_layers = n_prefilt_layers
-        self.prefilt_layers = nn.ModuleList(*[
-            nn.Sequential(
-                Blk(dim=n_ch[0], drop_path=p_dropout),
-                # nn.Conv1d(in_channels=n_ch[0],
-                #           out_channels=n_ch[0],
-                #           kernel_size=prefilt_kernel_size,
-                #           padding=prefilt_padding,
-                #           stride=1),
-                # activation_layer(),
-                nn.Dropout(p=p_dropout)
-            )
+        self.prefilt_layers = nn.Sequential(*[
+            Blk(dim=n_ch[0], drop_path=p_dropout)
             for _ in range(n_prefilt_layers - 1)
         ])
         self.residual = residual
@@ -572,7 +563,7 @@ class ResCNext(nn.Module):
 if __name__ == '__main__':
     model = ResCNext(a_lrelu=0.3, activation_fn='leaky', n_bins_in=264,
                      n_chan_input=1, n_chan_layers=(40, 30, 30, 10, 3),
-                     n_prefilt_layers=2, output_dim=384, p_dropout=0.2,
+                     n_prefilt_layers=3, output_dim=384, p_dropout=0.2,
                      prefilt_kernel_size=15, residual=True)
     x = torch.randn(12, 1, 264)
     result = model.forward(x)
